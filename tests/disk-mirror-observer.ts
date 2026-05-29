@@ -42,6 +42,14 @@ import {
 	ORIGIN_RESTORE,
 	ORIGIN_SEED,
 } from "../src/sync/origins";
+import {
+	buildMetaSnapshot,
+	extractAffectedFileIds,
+	computeIncrementalMetaChanges,
+	isFileMetaDeletedValue,
+	type MetaChangeBatch,
+} from "../src/sync/fileMeta";
+import { isLocalOrigin } from "../src/sync/origins";
 
 let passed = 0;
 let failed = 0;
@@ -79,9 +87,27 @@ function makeHarness() {
 		getTextForPath: (path: string) => (path === FILE_PATH ? ytext : null),
 		getFileIdForText: (text: Y.Text) => (text === ytext ? FILE_ID : null),
 		idToText: { entries: () => new Map([[FILE_ID, ytext]]).entries() },
-		isFileMetaDeleted: (m: { deleted?: boolean } | undefined) => Boolean(m?.deleted),
-		// v3: semantic change subscription used by DiskMirror.startMapObservers()
-		observeMetaChanges: (_cb: unknown) => () => { /* no-op unsubscribe in tests */ },
+		isFileMetaDeleted: (m: unknown) => isFileMetaDeletedValue(m),
+		// The harness uses the production-style deep semantic observer so nested
+		// Y.Map field mutations reach DiskMirror through the same dual-read path.
+		observeMetaChanges: (() => {
+			let snapshot = buildMetaSnapshot(meta as Y.Map<unknown>);
+			const listeners = new Set<(batch: MetaChangeBatch) => void>();
+			(meta as Y.Map<unknown>).observeDeep((events: Y.YEvent<Y.AbstractType<unknown>>[]) => {
+				const origin = events[0]?.transaction.origin;
+				const isLocal = isLocalOrigin(origin, fakeProvider);
+				const affected = extractAffectedFileIds(events, meta as Y.Map<unknown>);
+				if (!affected) return;
+				const changes = computeIncrementalMetaChanges(snapshot, meta as Y.Map<unknown>, affected);
+				if (changes.length === 0) return;
+				const batch: MetaChangeBatch = { origin, isLocal, changes };
+				for (const listener of listeners) listener(batch);
+			});
+			return (cb: (batch: MetaChangeBatch) => void) => {
+				listeners.add(cb);
+				return () => { listeners.delete(cb); };
+			};
+		})(),
 	};
 
 	const fakeEditorBindings = {

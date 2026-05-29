@@ -1151,6 +1151,9 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				if (oldCategory.kind === "excluded" && newCategory.kind === "excluded") return;
 
 				const renameOpId = this.newOpId();
+				// DiskMirror marks a passive receiver's filesystem rename so it is
+				// observed and traced without re-enqueuing an already-applied CRDT rename.
+				const isRemoteRename = this.diskMirror?.consumeRemoteRename(file.path) ?? false;
 
 				// Emit trace events for lineage via TraceSink (both sides).
 				if (oldCategory.kind === "markdown" || newCategory.kind === "markdown") {
@@ -1168,8 +1171,18 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 						severity: "info",
 						opId: renameOpId,
 						path: file.path,
-						data: { renameRole: "target", category: newCategory.kind, opId: renameOpId },
+						data: {
+							renameRole: "target",
+							category: newCategory.kind,
+							opId: renameOpId,
+							remoteOrigin: isRemoteRename,
+						},
 					});
+				}
+
+				if (isRemoteRename) {
+					this.log(`Remote-origin rename observed, skipping CRDT rename: "${oldPath}" -> "${file.path}"`);
+					return;
 				}
 
 				// Plan the action using the category-aware planner.

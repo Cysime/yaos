@@ -69,6 +69,11 @@ export function checkOrphanAfterRename(events: FlightEvent[]): AnalyzerFinding[]
 		// will appear for this intermediate path. This is correct behavior.
 		if (sourcePathIds.has(newPathId)) continue;
 
+// Remote-origin rename: DiskMirror applied this rename in response to a remote
+		// metadata path change. The passive receiver has no second crdt.file.renamed event.
+		const isRemoteOrigin = (renameEvent.data as Record<string, unknown> | undefined)?.remoteOrigin === true;
+		if (isRemoteOrigin) continue;
+
 		// Find the source-role event with the same opId to get oldPathId.
 		const sourceEvent = events.find((e) =>
 			e.kind === "disk.rename.observed"
