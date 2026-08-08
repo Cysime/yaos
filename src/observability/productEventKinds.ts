@@ -26,6 +26,7 @@ export const PRODUCT_EVENT_KIND = {
 	reconcileStart: "reconcile.start",
 	reconcileComplete: "reconcile.complete",
 	reconcileFileDecision: "reconcile.file.decision",
+	reconcileFileDeferred: "reconcile.file.deferred",
 	reconcileSafetyBrakeTriggered: "reconcile.safety_brake.triggered",
 
 	// Recovery
@@ -41,6 +42,9 @@ export const PRODUCT_EVENT_KIND = {
 	// Editor
 	editorHealApplied: "editor.heal.applied",
 	editorRepairApplied: "editor.repair.applied",
+
+	// Rename admission
+	renameAdmissionCanonicalCollision: "rename.admission.canonical-collision",
 } as const;
 
 export type ProductEventKind =

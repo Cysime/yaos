@@ -185,10 +185,44 @@ console.log("\n--- Test 10: No genuine growth does not trigger ---");
 	assert(result.quarantined === false, "stationary (no growth) not quarantined");
 }
 
-console.log("\n--- Test 11: History is capped at max entries ---");
+console.log("\n--- Test 11a: History is capped at max entries (no quarantine, non-monotonic nextLen in last-3 slice) ---");
 {
+	// Feed 5 entries where the 4th entry has a LOWER nextLen than the 3rd.
+	// After appending the new entry and capping, the last-3 slice includes
+	// the non-monotonic entry, so quarantine must NOT fire.
 	const history: AmplificationEntry[] = [
-		{ prevLen: 10, nextLen: 20, at: 100 },
+		{ prevLen: 10, nextLen: 20, at: 100 }, // ← will be evicted by capping
+		{ prevLen: 20, nextLen: 30, at: 200 },
+		{ prevLen: 30, nextLen: 40, at: 300 },
+		{ prevLen: 40, nextLen: 50, at: 400 },
+		{ prevLen: 50, nextLen: 35, at: 500 }, // nextLen DROPS (50 → 35)
+	];
+	// After appending {prevLen:35, nextLen:45, at:600} and evicting oldest:
+	// capped = [{20→30}, {30→40}, {40→50}, {50→35}, {35→45}]
+	// last-3 slice: [{40→50}, {50→35}, {35→45}]
+	//   nextLen sequence: 50, 35, 45 → 50→35 violates non-decreasing → no quarantine
+	const result = evaluateAmplificationQuarantine({
+		prevLen: 35,
+		nextLen: 45,
+		now: 600,
+		history,
+	});
+	assert(result.quarantined === false, "non-monotonic nextLen in last-3 slice prevents quarantine");
+	if (!result.quarantined) {
+		assert(result.newHistory.length === 5, "history capped at max entries (5)");
+		assert(result.newHistory[0]!.prevLen === 20, "oldest entry (prevLen=10) evicted");
+	}
+}
+
+console.log("\n--- Test 11b: History capping also occurs before a quarantine decision ---");
+{
+	// Feed a full 5-entry monotonic history. Adding one more should cap to 5 AND
+	// trigger quarantine on the resulting slice. We confirm quarantine fires AND
+	// that the internal newHistory (built before the quarantine check) would have
+	// had the oldest entry evicted — evidenced by the triggerSlice not containing
+	// the original first entry.
+	const history: AmplificationEntry[] = [
+		{ prevLen: 10, nextLen: 20, at: 100 }, // ← this entry should be evicted
 		{ prevLen: 20, nextLen: 30, at: 200 },
 		{ prevLen: 30, nextLen: 40, at: 300 },
 		{ prevLen: 40, nextLen: 50, at: 400 },
@@ -200,10 +234,15 @@ console.log("\n--- Test 11: History is capped at max entries ---");
 		now: 600,
 		history,
 	});
-	// New entry added, oldest evicted
-	if (!result.quarantined) {
-		assert(result.newHistory.length === 5, "history capped at 5 entries");
-		assert(result.newHistory[0]!.prevLen === 20, "oldest entry evicted");
+	assert(result.quarantined === true, "monotonic growth on full history quarantines");
+	if (result.quarantined) {
+		// The trigger slice is the last 3 entries of the capped history.
+		// After capping, the 5 entries are [20→30, 30→40, 40→50, 50→60, 60→70].
+		// Slice of last 3: [40→50, 50→60, 60→70].
+		assert(result.triggerSlice.length === 3, "trigger slice has 3 entries");
+		assert(result.triggerSlice[0]!.prevLen === 40, "oldest evicted; slice starts at prevLen=40");
+		assert(result.firstPrevLen === 40, "firstPrevLen reflects post-eviction slice");
+		assert(result.lastNextLen === 70, "lastNextLen is the new entry");
 	}
 }
 

@@ -126,7 +126,7 @@ export async function installTelemetryRuntime(host: TelemetryRuntimeHost): Promi
 	const diagnosticsService = new DiagnosticsService({
 		app: host.app,
 		getSettings: () => host.getSettings(),
-		getVaultSync: () => host.getVaultSync(),
+		getSyncState: () => host.getSyncState(),
 		getDiskMirror: () => host.getDiskMirror(),
 		getBlobSync: () => host.getBlobSync(),
 		getTraceHttpContext: () => host.getTraceHttpContext(),
@@ -209,7 +209,7 @@ export async function installTelemetryRuntime(host: TelemetryRuntimeHost): Promi
 		const ctx = flightTrace?.context;
 		if (!sink || !ctx) return;
 
-		const vaultSync = host.getVaultSync();
+		const vaultSync = host.getSyncState();
 		deviceWitnessTracker = new DeviceWitnessTracker({
 			configDir: host.app.vault.configDir,
 			flightMode: mode,
@@ -238,16 +238,13 @@ export async function installTelemetryRuntime(host: TelemetryRuntimeHost): Promi
 				}
 			},
 			readCrdtContent: (path: string) => {
-				// Yjs Text has a proper toString() implementation
-				// eslint-disable-next-line @typescript-eslint/no-base-to-string
-				return host.getVaultSync()?.getTextForPath(path)?.toString() ?? null;
+				return host.getSyncState()?.getPathContent(path) ?? null;
 			},
 			isCrdtTombstoned: (path: string) => {
-				return host.getVaultSync()?.isPathTombstoned(path) ?? false;
+				return host.getSyncState()?.isPathTombstoned(path) ?? false;
 			},
 			getFileId: (path: string) => {
-				const vaultSync = host.getVaultSync();
-				return vaultSync?.getFileIdForText(vaultSync?.getTextForPath(path) ?? null as unknown as import("yjs").Text) ?? undefined;
+				return host.getSyncState()?.getFileIdForPath(path);
 			},
 			sampleEditor: (path: string) => {
 				try {

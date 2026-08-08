@@ -24,10 +24,9 @@
  *
  * Allowed:
  *   - qaDebugMode (settings flag check — this gates behavior, not imports)
- *   - _qaOfflineHold in connectionController (existing, to be migrated later)
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const SYNC_RUNTIME_FORBIDDEN = [
@@ -45,18 +44,27 @@ const TELEMETRY_FORBIDDEN = [
 	/import.*YaosUnsafeQaPort/,
 ];
 
-// Known exception: connectionController has _qaOfflineHold (to be migrated later).
-const KNOWN_EXCEPTIONS = new Set([
-	"src/runtime/connectionController.ts",
-]);
+// No known exceptions remain — QA offline simulation is now entirely inside
+// __YAOS_QA_HARNESS_ENABLED__ blocks in main.ts and dead-code eliminated from
+// production main.js. ConnectionController no longer owns QA mutation state.
+const KNOWN_EXCEPTIONS = new Set([]);
 
 let violations = 0;
 
 function scanDir(dir, forbiddenPatterns) {
+	// Fail CLOSED: if the directory we are supposed to guard does not exist,
+	// that is a structural error (renamed, deleted) — not a clean pass.
+	if (!existsSync(dir)) {
+		console.error(`FAIL: guarded directory "${dir}" does not exist. Rename or restructure detected?`);
+		violations++;
+		return;
+	}
 	let entries;
 	try {
 		entries = readdirSync(dir);
-	} catch {
+	} catch (err) {
+		console.error(`FAIL: could not read guarded directory "${dir}": ${err}`);
+		violations++;
 		return;
 	}
 	for (const entry of entries) {

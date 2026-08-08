@@ -147,6 +147,8 @@ const suites = [
 	[JITI, "tests/fingerprint-quarantine-policy.ts"],
 	// Autophagy: Amplification quarantine policy
 	[JITI, "tests/amplification-quarantine-policy.ts"],
+	// Telemetry loader failure-mode tests (no Obsidian, no fs, injected readFileFn)
+	[JITI, "tests/telemetry-loader.ts"],
 ];
 
 let totalPassed = 0;

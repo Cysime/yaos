@@ -101,6 +101,7 @@ const MAIN_FORBIDDEN = [
 	"pauseEditorPropagation",
 	"resumeEditorPropagation",
 	"setExternalEditPolicyOverride",
+	"setQaNetworkHold",
 ];
 
 // P2 regression guard — these seams were removed in P2 and must never return.

@@ -87,6 +87,8 @@ export const FLIGHT_KIND = {
 	diskRenameObserved: "disk.rename.observed",
 	/** Emitted when an excluded markdown destination reaches applyRenameBatch despite admission policy. Bug. */
 	renameAdmissionInvariantFailed: "rename.admission.invariant_failed",
+	/** Emitted when same-identity rename fires but CRDT already has distinct entries for both NFC/NFD forms. */
+	renameAdmissionCanonicalCollision: "rename.admission.canonical-collision",
 
 	// CRDT
 	crdtFileCreated: "crdt.file.created",
@@ -98,6 +100,7 @@ export const FLIGHT_KIND = {
 	// Reconcile
 	reconcileStart: "reconcile.start",
 	reconcileFileDecision: "reconcile.file.decision",      // priority: critical when conflictRisk=ambiguous
+	reconcileFileDeferred: "reconcile.file.deferred",      // priority: verbose — open/bound file skipped, convergence via editor binding
 	reconcileSafetyBrakeTriggered: "reconcile.safety_brake.triggered", // priority: critical
 	reconcileComplete: "reconcile.complete",
 

@@ -39,6 +39,13 @@ interface ConnectionControllerDeps {
 	log(message: string): void;
 	trace: TraceRecord;
 	registerCleanup(cleanup: () => void): void;
+	/**
+	 * Optional QA reconnect blocker. When provided and returns true, all
+	 * reconnect paths (manual, visibility, network-online) are blocked.
+	 * Only wired in QA product builds (__YAOS_QA_HARNESS_ENABLED__=true in main.ts).
+	 * Production builds never provide this callback — it does not exist in main.js.
+	 */
+	isReconnectBlocked?(): boolean;
 }
 
 export class ConnectionController {
@@ -49,41 +56,7 @@ export class ConnectionController {
 	private fastReconnectConnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private lastFastReconnectAt = 0;
 
-	/** When true, ALL reconnect paths are blocked (QA offline simulation). */
-	private _qaOfflineHold = false;
-
 	constructor(private readonly deps: ConnectionControllerDeps) {}
-
-	/**
-	 * QA: hold the provider offline/online. When "offline", no reconnect path
-	 * (visibility handler, network handler, timer, manual reconnect) will fire.
-	 * This is the only reliable way to simulate true offline in a Playwright/CDP test.
-	 */
-	setQaNetworkHold(mode: "offline" | "online"): void {
-		this._qaOfflineHold = mode === "offline";
-		const sync = this.deps.getVaultSync();
-		if (!sync) return;
-		if (mode === "offline") {
-			// Cancel any pending fast reconnect timers
-			if (this.fastReconnectDebounceTimer) {
-				clearTimeout(this.fastReconnectDebounceTimer);
-				this.fastReconnectDebounceTimer = null;
-			}
-			if (this.fastReconnectConnectTimer) {
-				clearTimeout(this.fastReconnectConnectTimer);
-				this.fastReconnectConnectTimer = null;
-			}
-			sync.provider.disconnect();
-			this.deps.log("QA offline hold activated — provider disconnected, reconnects blocked");
-		} else {
-			this.deps.log("QA offline hold released — reconnects permitted, connecting…");
-			void sync.provider.connect().catch((e: unknown) =>
-				this.deps.log(`QA connectProvider error: ${String(e)}`),
-			);
-		}
-	}
-
-	get qaOfflineHold(): boolean { return this._qaOfflineHold; }
 
 	start(): void {
 		this.setupProviderStatusHandler();
@@ -122,7 +95,7 @@ export class ConnectionController {
 			this.deps.log(`Reconnect skipped (${reason}): fatal auth (${sync.fatalAuthCode ?? "unknown"})`);
 			return;
 		}
-		if (this._qaOfflineHold) {
+		if (this.deps.isReconnectBlocked?.()) {
 			this.deps.log(`Reconnect blocked (${reason}): QA offline hold is active`);
 			return;
 		}
@@ -324,7 +297,7 @@ export class ConnectionController {
 			this.deps.log(`Fast reconnect skipped (${reason}): fatal auth (${sync.fatalAuthCode ?? "unknown"})`);
 			return;
 		}
-		if (this._qaOfflineHold) {
+		if (this.deps.isReconnectBlocked?.()) {
 			this.deps.log(`Fast reconnect blocked (${reason}): QA offline hold is active`);
 			return;
 		}

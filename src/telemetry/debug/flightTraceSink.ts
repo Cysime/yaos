@@ -11,38 +11,64 @@
  *   - Delegates to the provided recordFlightPathEvent callback
  *   - Is non-blocking (recordPath queues internally via the callback)
  *   - Tracks dropped events for observability in QA/dev mode
+ *
+ * INVARIANT: every kind registered in PRODUCT_EVENT_KIND must have an entry
+ * in DOMAIN_TO_FLIGHT_KIND. The CI check in tests/trace-sink.ts enforces
+ * _droppedEventCount === 0 for all known product event kinds.
  */
 
 import type { TraceSink, DomainTraceEvent, DomainPathTraceEvent } from "../../observability/traceSink";
-import { FLIGHT_KIND, type FlightKind, type FlightPathEventInput, type FlightLayer } from "./flightEvents";
+import { FLIGHT_KIND, type FlightKind, type FlightPathEventInput, type FlightLayer, type FlightSource } from "./flightEvents";
 
 type FlightPathRecorder = (event: FlightPathEventInput) => void;
 
 /**
  * Map domain event kinds to FLIGHT_KIND constants.
- * Rename cluster + disk observation cluster.
+ * All PRODUCT_EVENT_KIND values must appear here.
  */
 const DOMAIN_TO_FLIGHT_KIND: Record<string, string> = {
 	// Rename cluster
 	"rename.observed": FLIGHT_KIND.diskRenameObserved,
 	"rename.admission.invariant-failed": FLIGHT_KIND.renameAdmissionInvariantFailed,
+	"rename.admission.canonical-collision": FLIGHT_KIND.renameAdmissionCanonicalCollision,
 	// Disk observation cluster
 	"disk.create.observed": FLIGHT_KIND.diskCreateObserved,
 	"disk.modify.observed": FLIGHT_KIND.diskModifyObserved,
 	"disk.delete.observed": FLIGHT_KIND.diskDeleteObserved,
 	"disk.event.suppressed": FLIGHT_KIND.diskEventSuppressed,
+	// CRDT lifecycle cluster (migrated from vaultSync.ts direct FLIGHT_KIND usage)
+	"crdt.file.created": FLIGHT_KIND.crdtFileCreated,
+	"crdt.file.renamed": FLIGHT_KIND.crdtFileRenamed,
+	"crdt.file.tombstoned": FLIGHT_KIND.crdtFileTombstoned,
+	"crdt.file.revived": FLIGHT_KIND.crdtFileRevived,
+	// Reconcile deferred (open/bound file skipped; convergence via editor binding path)
+	"reconcile.file.deferred": FLIGHT_KIND.reconcileFileDeferred,
 };
 
 /**
- * Map domain event kinds to layer.
- * Policy layer: admission decisions, suppression decisions.
- * Disk layer: raw observations.
+ * Map domain event kinds to flight layer.
  */
 function kindToLayer(kind: string): FlightLayer {
 	if (kind.startsWith("rename.admission") || kind === "disk.event.suppressed") {
 		return "policy";
 	}
+	if (kind.startsWith("crdt.")) {
+		return "crdt";
+	}
+	if (kind.startsWith("reconcile.")) {
+		return "reconcile";
+	}
 	return "disk";
+}
+
+/**
+ * Map domain event kinds to flight source.
+ */
+function kindToSource(kind: string): FlightSource {
+	if (kind.startsWith("crdt.") || kind.startsWith("reconcile.")) {
+		return "vaultSync";
+	}
+	return "vaultEvents";
 }
 
 /**
@@ -59,16 +85,20 @@ function severityToPriority(severity: DomainTraceEvent["severity"]): "critical" 
 
 export class FlightTraceSink implements TraceSink {
 	/**
-	 * Count of domain events that were dropped because no FLIGHT_KIND mapping exists.
+	 * Count of domain events dropped because no FLIGHT_KIND mapping exists.
 	 * Visible via getDroppedEventCount() for QA/dev mode observability.
+	 * Also counts record() drops (non-path events not yet mapped).
 	 */
 	private _droppedEventCount = 0;
 
 	constructor(private readonly recordFlight: FlightPathRecorder) {}
 
-	record(_event: DomainTraceEvent): void {
-		// Non-path events not yet mapped in this phase.
-		// Future: map to FlightEventInput via a non-path recorder.
+	record(event: DomainTraceEvent): void {
+		// Non-path events not yet mapped — count the drop.
+		// When non-path PRODUCT_EVENT_KIND values are added, add them to
+		// a DOMAIN_TO_FLIGHT_EVENT mapping and route through recordFlight.
+		void event;
+		this._droppedEventCount++;
 	}
 
 	recordPath(event: DomainPathTraceEvent): void {
@@ -86,14 +116,15 @@ export class FlightTraceSink implements TraceSink {
 			kind: flightKind as FlightKind,
 			severity: event.severity,
 			scope: event.scope,
-			source: "vaultEvents",
+			source: kindToSource(event.kind) as FlightSource,
 			layer: kindToLayer(event.kind),
 			opId: event.opId ?? event.data?.["opId"] as string | undefined,
 			path: event.path,
-			data: event.data,
-			// Lift reason/decision from data for disk.event.suppressed compatibility
+			// Lift structured fields out of data for flight schema compatibility
+			fileId: event.data?.["fileId"] as string | undefined,
 			reason: event.data?.["reason"] as string | undefined,
 			decision: event.data?.["decision"] as string | undefined,
+			data: event.data,
 		});
 	}
 
@@ -108,6 +139,7 @@ export class FlightTraceSink implements TraceSink {
 	 * A non-zero count indicates that either:
 	 *   - A new domain event kind needs to be added to DOMAIN_TO_FLIGHT_KIND
 	 *   - A trace call is using the wrong event kind
+	 *   - record() was called (non-path events are not yet mapped)
 	 */
 	getDroppedEventCount(): number {
 		return this._droppedEventCount;

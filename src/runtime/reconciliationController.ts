@@ -750,18 +750,35 @@ export class ReconciliationController {
 						}
 					}
 				}
-				for (const path of result.updatedOnDisk) {
-					const diskContent = diskFiles.get(path);
-					const ytext = vaultSync.getTextForPath(path);
-					const isOpenOrBound =
-						(this.deps.getEditorBindings()?.isBound(path) ?? false) ||
-						this.getOpenMarkdownViewsForPath(path).length > 0;
-					if (
-						mode === "authoritative" &&
-						!isOpenOrBound &&
-						diskContent !== undefined &&
-						ytext
-					) {
+			for (const path of result.updatedOnDisk) {
+				const diskContent = diskFiles.get(path);
+				const ytext = vaultSync.getTextForPath(path);
+				const isOpenOrBound =
+					(this.deps.getEditorBindings()?.isBound(path) ?? false) ||
+					this.getOpenMarkdownViewsForPath(path).length > 0;
+				if (
+					mode === "authoritative" &&
+					!isOpenOrBound &&
+					diskContent !== undefined &&
+					ytext
+				) {
+					// NOTE: open/bound files are intentionally excluded from the
+					// closed-file reconcile planner (planClosedFileReconcile Rule 2).
+					// For open files, the live editor binding (y-codemirror) handles
+					// CRDT↔editor convergence. For bound-but-not-open files, the
+					// binding manages writes. Disk divergence on an open/bound file
+					// is deferred: the next syncFileFromDisk call after the file
+					// closes will resolve it.
+					//
+					// BEHAVIORAL NOTE (from pre-extraction audit):
+					// Before the closedFilePlanner extraction (a6f2080), the
+					// updatesToFlush.push(path) call sat OUTSIDE this if-block,
+					// so open/bound files were also flushed to disk during reconcile.
+					// The extraction moved the push inside, correctly aligning with
+					// the planner's intent. The live-sync path IS responsible for
+					// open files. If you see open-file disk-divergence in traces
+					// after reconcile, syncFileFromDisk (not runReconciliation) is
+					// the place to look for the resolution.
 						const crdtContent = yTextToString(ytext) ?? "";
 						// SHA-256 hashes for three-way authority decision.
 						const diskHash = await contentBaselineHash(diskContent);
@@ -897,11 +914,33 @@ export class ReconciliationController {
 							flushedUpdates++;
 							continue;
 						}
-						// action.kind === "apply-remote-to-disk", "no-op", or "defer-to-crdt-flush":
-						// CRDT wins or nothing to do. Fall through to flush.
-						// Preserve the semantic action kind for baseline advancement.
-						updatesToFlush.push({ path, baselineActionKind: action.kind });
-					}
+					// action.kind === "apply-remote-to-disk", "no-op", or "defer-to-crdt-flush":
+					// CRDT wins or nothing to do. Fall through to flush.
+					// Preserve the semantic action kind for baseline advancement.
+					updatesToFlush.push({ path, baselineActionKind: action.kind });
+				} else if (isOpenOrBound) {
+					// File is open or editor-bound: intentionally skipped.
+					// Convergence paths:
+					//   "always" policy → vault.modify event → syncFileFromDisk →
+					//     handleBoundFileSyncGap resolves via editor binding.
+					//   "closed-only" policy → maybeImportDeferredClosedOnlyPath on close.
+					//   stale binding → syncFileFromDisk clears it on next call.
+					//   CRDT-ahead case → y-codemirror keeps editor in sync → diskMirror writes.
+					this.deps.recordFlightPathEvent?.({
+						priority: "verbose",
+						kind: PRODUCT_EVENT_KIND.reconcileFileDeferred,
+						severity: "info",
+						scope: "file",
+						source: "reconciliationController",
+						layer: "reconcile",
+						path,
+						data: {
+							reason: "open-or-bound",
+							isOpenInEditor: this.getOpenMarkdownViewsForPath(path).length > 0,
+							isBound: this.deps.getEditorBindings()?.isBound(path) ?? false,
+						},
+					});
+				}
 				}
 				for (const { path, baselineActionKind } of updatesToFlush) {
 					await diskMirror.flushWrite(path);

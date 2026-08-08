@@ -3,7 +3,7 @@ import { deriveSyncFacts } from "../../runtime/connectionFacts";
 import { formatUnknown } from "../../utils/format";
 import { BlobSyncManager } from "../../sync/blobSync";
 import { DiskMirror } from "../../sync/diskMirror";
-import { VaultSync, type ReconcileMode } from "../../sync/vaultSync";
+import type { SyncReadPort } from "../telemetryRuntimeHost";
 import type { TraceHttpContext } from "../debug/trace";
 import type { VaultSyncSettings } from "../../settings";
 import {
@@ -13,6 +13,7 @@ import {
 import { ConfirmModal } from "../../ui/ConfirmModal";
 import { buildDiagnosticsBundle } from "./diagnosticsBundle";
 import type { DiagnosticsBundleInput } from "./diagnosticsBundle";
+import type { ReconcileMode } from "../../sync/vaultSync";
 
 type EventEntry = { ts: string; msg: string };
 
@@ -46,7 +47,7 @@ interface DiagnosticsServiceDeps {
 	app: App;
 	getSettings(): VaultSyncSettings;
 	getTraceHttpContext(): TraceHttpContext | undefined;
-	getVaultSync(): VaultSync | null;
+	getSyncState(): SyncReadPort | null;
 	getDiskMirror(): DiskMirror | null;
 	getBlobSync(): BlobSyncManager | null;
 	getEventRing(): EventEntry[];
@@ -72,7 +73,7 @@ export class DiagnosticsService {
 	constructor(private readonly deps: DiagnosticsServiceDeps) {}
 
 	buildDebugInfo(): string {
-		const vaultSync = this.deps.getVaultSync();
+		const vaultSync = this.deps.getSyncState();
 		if (!vaultSync) return "Sync not initialized";
 		const settings = this.deps.getSettings();
 		const state = this.deps.getState();
@@ -158,7 +159,7 @@ export class DiagnosticsService {
 			`IndexedDB error message: ${vaultSync.idbErrorDetails?.message ?? "(none)"}`,
 			`Schema supported/local: ${vaultSync.supportedSchemaVersion}/${vaultSync.storedSchemaVersion ?? "(unset)"}`,
 			`CRDT paths: ${vaultSync.getActiveMarkdownPaths().length}`,
-			`Blob paths: ${vaultSync.pathToBlob.size}`,
+			`Blob paths: ${vaultSync.blobPathCount}`,
 			`Untracked files: ${state.untrackedFileCount}`,
 			`Active disk observers: ${this.deps.getDiskMirror()?.activeObserverCount ?? 0}`,
 			`External edit policy: ${settings.externalEditPolicy}`,
@@ -175,7 +176,7 @@ export class DiagnosticsService {
 
 	buildRecentEventsText(limit = 80): string {
 		const mainEvents = this.deps.getEventRing().slice(-limit).map((e) => `[plugin] ${e.ts} ${e.msg}`);
-		const syncEvents = this.deps.getVaultSync()?.getRecentEvents(limit).map((e) => `[sync]   ${e.ts} ${e.msg}`) ?? [];
+		const syncEvents = this.deps.getSyncState()?.getRecentEvents(limit).map((e) => `[sync]   ${e.ts} ${e.msg}`) ?? [];
 		const serverEvents = this.deps.getRecentServerTrace()
 			.slice(-limit)
 			.map((e) => {
@@ -226,7 +227,7 @@ export class DiagnosticsService {
 	}
 
 	private async runExport(options: { includeFilenames: boolean }): Promise<void> {
-		const vaultSync = this.deps.getVaultSync();
+		const vaultSync = this.deps.getSyncState();
 		if (!vaultSync) {
 			new Notice("Sync not initialized");
 			return;
@@ -265,9 +266,8 @@ export class DiagnosticsService {
 
 		const crdtHashes = new Map<string, { hash: string; length: number }>();
 		for (const path of crdtPaths) {
-			const ytext = vaultSync.getTextForPath(path);
-			if (!ytext) continue;
-			const content = ytext.toJSON();
+			const content = vaultSync.getPathContent(path);
+			if (content === null) continue;
 			crdtHashes.set(path, {
 				hash: await this.deps.sha256Hex(content),
 				length: content.length,
@@ -327,9 +327,9 @@ export class DiagnosticsService {
 				idbErrorDetails: vaultSync.idbErrorDetails,
 				serverReceiptStartupValidation: vaultSync.serverReceiptStartupValidation,
 				svEcho: vaultSync.svEchoCounters,
-				pathToIdCount: vaultSync.pathToId.size,
+				pathToIdCount: vaultSync.getActiveMarkdownPaths().length,
 				activePathCount: vaultSync.getActiveMarkdownPaths().length,
-				blobPathCount: vaultSync.pathToBlob.size,
+				blobPathCount: vaultSync.blobPathCount,
 				diskFileCount: diskFiles.length,
 				openFileCount: state.openFileCount,
 				schema: {
@@ -341,8 +341,8 @@ export class DiagnosticsService {
 			trace: this.deps.getTraceHttpContext(),
 			diskHashes,
 			crdtHashes,
-			eventRing: this.deps.getEventRing(),
-			syncEvents: vaultSync.getRecentEvents(240),
+			eventRing: this.deps.getEventRing() as Array<{ ts: string; msg: string }>,
+			syncEvents: vaultSync.getRecentEvents(240) as Array<{ ts: string; msg: string }>,
 			serverTrace: this.deps.getRecentServerTrace(),
 			openFiles: await this.deps.collectOpenFileTraceState(),
 			diskMirrorSnapshot: this.deps.getDiskMirror()?.getDebugSnapshot() ?? null,

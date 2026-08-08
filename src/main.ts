@@ -19,6 +19,7 @@ import { planCategoryRenameAction } from "./sync/policy/renameAdmissionPolicy";
 import { classifySyncPath } from "./paths/pathCategory";
 import type { TraceSink, ProductFlightPathEventInput } from "./observability/traceSink";
 import { NoopTraceSink } from "./observability/noopTraceSink";
+import { PRODUCT_EVENT_KIND } from "./observability/productEventKinds";
 import {
 	type FrontmatterValidationResult,
 } from "./sync/frontmatterGuard";
@@ -153,6 +154,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		pausedEditorPropagationPaths: Set<string>;
 		bindingReconfigureHook: ((path: string, deviceName: string, action: "pause" | "resume") => void) | null;
 		controlPort: EngineControlPort;
+		/** QA offline hold: when true, all reconnect paths are blocked. */
+		offlineHold: boolean;
 	} | null = null;
 	/** Domain-level trace sink. Routes to lab when active, noop otherwise. */
 	private traceSink: TraceSink = new NoopTraceSink();
@@ -286,6 +289,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				externalEditPolicyOverride: null,
 				pausedEditorPropagationPaths: new Set(),
 				bindingReconfigureHook: null,
+				offlineHold: false,
 				controlPort: {
 					ingestDiskFileNow: async (path, reason = "modify") => {
 						if (!this._qaState?.diskIngestPort) throw new Error("DiskIngestPort not registered (reconciliation controller not started?)");
@@ -319,6 +323,24 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			(this as any).getEngineControlPort = (): EngineControlPort => {
 				if (!this._qaState) throw new Error("QA harness state not initialised");
 				return this._qaState.controlPort;
+			};
+			// QA offline hold: blocks all reconnect paths in ConnectionController.
+			// The harness calls this via (product as any).setQaNetworkHold("offline"|"online").
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(this as any).setQaNetworkHold = (mode: "offline" | "online"): void => {
+				if (!this._qaState) return;
+				this._qaState.offlineHold = mode === "offline";
+				const sync = this.vaultSync;
+				if (!sync) return;
+				if (mode === "offline") {
+					sync.provider.disconnect();
+					this.log("QA offline hold activated — provider disconnected, reconnects blocked");
+				} else {
+					this.log("QA offline hold released — reconnects permitted, connecting…");
+					void sync.provider.connect().catch((e: unknown) =>
+						this.log(`QA connectProvider error: ${String(e)}`),
+					);
+				}
 			};
 		}
 
@@ -407,59 +429,102 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 		// Install telemetry runtime when debug or qaDebugMode is enabled.
 		// Dynamic load keeps telemetry code out of the product bundle on normal startup.
-		if (this.settings.debug || this.settings.qaDebugMode) {
-			// Load telemetry.js by reading the file and evaluating it in the current
-			// module scope.  This is necessary because:
-			//   - import() in Obsidian's renderer uses app://obsidian.md scheme, which
-			//     cannot serve arbitrary filesystem paths outside the ASAR bundle.
-			//   - require() loads the file but the sub-module's own require doesn't
-			//     have Obsidian's patched require in scope, so require("obsidian") fails.
-			// Evaluating with new Function() and the current require passes Obsidian's
-			// patched require to the telemetry module so it can resolve "obsidian".
+		//
+		// Mobile guard: require("fs") is Node.js only and does not exist in Obsidian's
+		// mobile WebView renderer. Debug mode on mobile is silently ignored — diagnostics
+		// are unavailable but sync continues normally.
+		if ((this.settings.debug || this.settings.qaDebugMode) && !Platform.isMobile) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			const pluginDir = `${(this.app.vault.adapter as any).basePath}/${this.manifest.dir}`;
-			const telemetryBundlePath = `${pluginDir}/telemetry.js`;
 			// eslint-disable-next-line @typescript-eslint/no-require-imports
-			const fs = require("fs") as typeof import("fs");
-			const telemetryCode = fs.readFileSync(telemetryBundlePath, "utf-8");
-			const telemetryModule = { exports: {} as Record<string, unknown> };
-			// eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval
-			const telemetryFn = new Function("require", "module", "exports", "__filename", "__dirname", telemetryCode);
-			telemetryFn(require, telemetryModule, telemetryModule.exports, telemetryBundlePath, pluginDir);
-			const { installTelemetryRuntime } = telemetryModule.exports as typeof import("./telemetry/installTelemetryRuntime");
-			this.lab = await installTelemetryRuntime({
-				app: this.app,
-				getSettings: () => this.settings,
-				getVaultSync: () => this.vaultSync,
-				getReconciliationController: () => this.reconciliationController,
-				getConnectionController: () => this.connectionController,
-				getEditorBindings: () => this.editorBindings,
-				getTraceSink: () => this.traceSink,
-				getTraceHttpContext: () => this.getTraceHttpContext(),
-				getDiskMirror: () => this.diskMirror,
-				getBlobSync: () => this.getBlobSync(),
-				getEventRing: () => this.eventRing,
-				getRecentServerTrace: () => this.traceRuntime?.getRecentServerTrace() ?? [],
-				getFrontmatterQuarantineEntries: () => this.frontmatterQuarantineEntries,
-				getRuntimeDiagnosticsState: () => ({
-					reconciled: this.reconciliationController.getState().reconciled,
-					reconcileInFlight: this.reconciliationController.getState().reconcileInFlight,
-					reconcilePending: this.reconciliationController.getState().reconcilePending,
-					lastReconcileStats: this.reconciliationController.getState().lastReconcileStats,
-					awaitingFirstProviderSyncAfterStartup: this.awaitingFirstProviderSyncAfterStartup,
-					lastReconciledGeneration: this.reconciliationController.getState().lastReconciledGeneration,
-					untrackedFileCount: this.reconciliationController.untrackedFileCount,
-					openFileCount: this.editorWorkspace?.openFileCount ?? 0,
-				}),
-				collectOpenFileTraceState: () => this.collectOpenFileTraceState(),
-				sha256Hex: (text) => this.sha256Hex(text),
-				getPluginVersion: () => this.manifest.version,
-				isMarkdownPathSyncable: (path) => this.isMarkdownPathSyncable(path),
-				registerCleanup: (cleanup) => this.register(cleanup),
-				log: (msg) => this.log(msg),
-			});
-			// Replace noop traceSink with telemetry's FlightTraceSink
-			this.traceSink = this.lab.traceSink;
+			const pluginRequire = require;
+			const host: import("./telemetry/telemetryRuntimeHost").TelemetryRuntimeHost = {
+					app: this.app,
+					getSettings: () => this.settings,
+					getSyncState: (): import("./telemetry/telemetryRuntimeHost").SyncReadPort | null => {
+						const vs = this.vaultSync;
+						if (!vs) return null;
+						return {
+							get connected() { return vs.connected; },
+							get fatalAuthError() { return vs.fatalAuthError; },
+							get fatalAuthCode() { return vs.fatalAuthCode; },
+							get fatalAuthDetails() { return vs.fatalAuthDetails; },
+							get localReady() { return vs.localReady; },
+							get providerSynced() { return vs.providerSynced; },
+							get isInitialized() { return vs.isInitialized; },
+							get connectionGeneration() { return vs.connectionGeneration; },
+							get lastLocalUpdateAt() { return vs.lastLocalUpdateAt; },
+							get lastLocalUpdateWhileConnectedAt() { return vs.lastLocalUpdateWhileConnectedAt; },
+							get lastRemoteUpdateAt() { return vs.lastRemoteUpdateAt; },
+							get serverAppliedLocalState() { return vs.serverAppliedLocalState; },
+							get lastServerReceiptEchoAt() { return vs.lastServerReceiptEchoAt; },
+							get lastKnownServerReceiptEchoAt() { return vs.lastKnownServerReceiptEchoAt; },
+							get hasUnconfirmedServerReceiptCandidate() { return vs.hasUnconfirmedServerReceiptCandidate; },
+							get serverReceiptCandidateCapturedAt() { return vs.serverReceiptCandidateCapturedAt; },
+							get serverReceiptStartupValidation() { return vs.serverReceiptStartupValidation; },
+							get svEchoCounters() { return vs.svEchoCounters; },
+							get candidatePersistenceHealthy() { return vs.candidatePersistenceHealthy; },
+							get candidatePersistenceFailureCount() { return vs.candidatePersistenceFailureCount; },
+							get idbError() { return vs.idbError; },
+							get idbErrorDetails() { return vs.idbErrorDetails; },
+							get supportedSchemaVersion() { return vs.supportedSchemaVersion; },
+							get storedSchemaVersion() { return vs.storedSchemaVersion; },
+							get blobPathCount() { return vs.pathToBlob.size; },
+							getPathContent: (path: string) => {
+								const ytext = vs.getTextForPath(path);
+								// eslint-disable-next-line @typescript-eslint/no-base-to-string
+								return ytext ? ytext.toString() : null;
+							},
+							getFileIdForPath: (path: string) => {
+								const ytext = vs.getTextForPath(path);
+								return ytext ? vs.getFileIdForText(ytext) : undefined;
+							},
+							isPathTombstoned: (path: string) => vs.isPathTombstoned(path),
+							getActiveMarkdownPaths: () => vs.getActiveMarkdownPaths(),
+							getRecentEvents: (limit?: number) => vs.getRecentEvents(limit),
+							getSafeReconcileMode: () => vs.getSafeReconcileMode(),
+							observeMetaChanges: (cb) => vs.observeMetaChanges(cb),
+						};  // satisfies SyncReadPort — narrower union types on VaultSync are compatible
+					},
+					getTraceSink: () => this.traceSink,
+					getTraceHttpContext: () => this.getTraceHttpContext(),
+					getDiskMirror: () => this.diskMirror,
+					getBlobSync: () => this.getBlobSync(),
+					getEventRing: () => this.eventRing,
+					getRecentServerTrace: () => this.traceRuntime?.getRecentServerTrace() ?? [],
+					getFrontmatterQuarantineEntries: () => this.frontmatterQuarantineEntries,
+					getRuntimeDiagnosticsState: () => ({
+						reconciled: this.reconciliationController.getState().reconciled,
+						reconcileInFlight: this.reconciliationController.getState().reconcileInFlight,
+						reconcilePending: this.reconciliationController.getState().reconcilePending,
+						lastReconcileStats: this.reconciliationController.getState().lastReconcileStats,
+						awaitingFirstProviderSyncAfterStartup: this.awaitingFirstProviderSyncAfterStartup,
+						lastReconciledGeneration: this.reconciliationController.getState().lastReconciledGeneration,
+						untrackedFileCount: this.reconciliationController.untrackedFileCount,
+						openFileCount: this.editorWorkspace?.openFileCount ?? 0,
+					}),
+					collectOpenFileTraceState: () => this.collectOpenFileTraceState(),
+					sha256Hex: (text) => this.sha256Hex(text),
+					getPluginVersion: () => this.manifest.version,
+					isMarkdownPathSyncable: (path) => this.isMarkdownPathSyncable(path),
+					registerCleanup: (cleanup) => this.register(cleanup),
+					log: (msg) => this.log(msg),
+			};
+			const { loadTelemetryBundle } = await import("./telemetry/telemetryLoader");
+			const result = await loadTelemetryBundle({ pluginDir, pluginRequire, host });
+			if (result.kind === "loaded") {
+				this.lab = result.runtime;
+				this.traceSink = this.lab.traceSink;
+			} else {
+				// Telemetry failed to load — sync continues with NoopTraceSink.
+				// this.lab remains null; all this.lab?.method() calls use optional chaining.
+				console.error(`[yaos] Telemetry load failed (${result.reason}): ${result.error}`);
+				new Notice(
+					"YAOS: telemetry runtime failed to load. Sync will continue without diagnostics. " +
+					"Check the developer console for details.",
+					10_000,
+				);
+			}
 		}
 
 		// setupTraceRuntime after telemetry install so createLogger can reference this.lab
@@ -729,6 +794,9 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				log: (message) => this.log(message),
 				trace: (source, msg, details) => this.trace(source, msg, details),
 				registerCleanup: (cleanup) => this.register(cleanup),
+				...__YAOS_QA_HARNESS_ENABLED__ && this._qaState ? {
+					isReconnectBlocked: () => this._qaState!.offlineHold,
+				} : {},
 			});
 			this.connectionController.start();
 
@@ -1146,11 +1214,48 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 						this.log(`Rename admission: blob "${oldPath}" leaving scope, deferred to events`);
 						break;
 
-					case "same-identity":
+					case "same-identity": {
 						// NFC/NFD or separator variant rename. Same sync identity.
 						// No CRDT mutation needed — not a real rename from sync perspective.
 						this.log(`Rename admission: same identity (canonical equivalent): "${oldPath}" -> "${file.path}"`);
+
+						// Diagnostic: if BOTH the old path AND new path already have distinct
+						// CRDT entries, the vault has a pre-existing NFC/NFD collision.
+						// That collision cannot be resolved via rename (this case no-ops it).
+						// Emit a trace event so the state is visible in flight logs.
+						// This does NOT resolve the collision — resolution is future work.
+						if (this.vaultSync) {
+							const vs = this.vaultSync;
+							const oldHasEntry = vs.getTextForPath(oldPath) !== null;
+							const newHasEntry = vs.getTextForPath(file.path) !== null;
+							if (oldHasEntry && newHasEntry && oldPath !== file.path) {
+								this.recordFlightPathEvent({
+									priority: "important",
+									kind: PRODUCT_EVENT_KIND.renameAdmissionCanonicalCollision,
+									severity: "warn",
+									scope: "file",
+									source: "vaultEvents",
+									layer: "policy",
+									path: file.path,
+									data: {
+										oldPath,
+										newPath: file.path,
+										oldCanonicalKey: oldCategory.path.canonicalKey,
+										newCanonicalKey: newCategory.path.canonicalKey,
+										note: "Both NFC/NFD forms exist as separate CRDT entries. " +
+											"Collision cannot be resolved via rename. " +
+											"Delete one entry to resolve.",
+									},
+								});
+								console.warn(
+									`[yaos] Canonical collision detected: "${oldPath}" and "${file.path}" ` +
+									`share a canonical key but both exist in CRDT. ` +
+									`Same-identity rename is a no-op; collision unresolved.`,
+								);
+							}
+						}
 						break;
+					}
 
 					case "ignore":
 						break;

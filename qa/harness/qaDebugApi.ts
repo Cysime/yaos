@@ -407,7 +407,11 @@ export function buildQaDebugApi(plugin: PluginHandle): YaosQaDebugApi {
 		},
 
 		setQaNetworkHold(mode: "offline" | "online"): void {
-			plugin.getConnectionController()?.setQaNetworkHold(mode);
+			if (mode === "offline") {
+				plugin.disconnectProvider("qa-network-hold-offline");
+			} else {
+				plugin.connectProvider("qa-network-hold-online");
+			}
 		},
 
 		isReconciled(): boolean {

@@ -342,9 +342,9 @@ export default class YaosQaHarnessPlugin extends Plugin {
 			// setQaNetworkHold("offline") holds the provider offline and blocks reconnects.
 			// setQaNetworkHold("online") releases the hold and triggers reconnect.
 			disconnectProvider: () =>
-				void (product as any).connectionController?.setQaNetworkHold("offline"),
+				void (product as any).setQaNetworkHold?.("offline"),
 			connectProvider: () =>
-				void (product as any).connectionController?.setQaNetworkHold("online"),
+				void (product as any).setQaNetworkHold?.("online"),
 			getDeviceWitnessTracker: () =>
 				(lab as any).getDeviceWitnessTracker?.() ?? null,
 			getScenarioController: () => scenarioController,
