@@ -557,7 +557,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(advancedBody)
-			.setName("QA flight recorder")
+			.setName("Diagnostics flight recorder")
 			.setDesc("Record structured sync traces for QA. Safe mode redacts filenames by default.")
 			.addToggle((toggle) =>
 				toggle
