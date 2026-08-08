@@ -602,16 +602,15 @@ section("Provider-origin: y-partyserver persistence update origin");
 	);
 }
 
-section("Schema version constants: client and server agree");
+section("Schema version constants: client v3 and server dual-read range agree");
 
 {
 	assertEqual(SCHEMA_VERSION, 3, "SCHEMA_VERSION from schema.ts is 3");
-	assertEqual(SERVER_MIN_SCHEMA_VERSION, 3, "SERVER_MIN_SCHEMA_VERSION from version.ts is 3");
-	assertEqual(SERVER_MAX_SCHEMA_VERSION, 3, "SERVER_MAX_SCHEMA_VERSION from version.ts is 3");
-	assertEqual(
-		SCHEMA_VERSION,
-		SERVER_MIN_SCHEMA_VERSION,
-		"client schema version matches server min schema version",
+	assertEqual(SERVER_MIN_SCHEMA_VERSION, 1, "SERVER_MIN_SCHEMA_VERSION retains v1 persisted-room compatibility");
+	assertEqual(SERVER_MAX_SCHEMA_VERSION, 3, "SERVER_MAX_SCHEMA_VERSION supports nested v3 metadata");
+	assert(
+		SERVER_MIN_SCHEMA_VERSION <= SCHEMA_VERSION && SCHEMA_VERSION <= SERVER_MAX_SCHEMA_VERSION,
+		"client schema version lies within the server's v1–v3 dual-read range",
 	);
 }
 
